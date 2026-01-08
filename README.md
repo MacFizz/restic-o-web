@@ -1,4 +1,4 @@
-# restic-o-web
+# Restic-o-web
 Simple installation script for restic/backrest
 
 Both restic and backrest are installed using their github latest release for the detected architecture.
