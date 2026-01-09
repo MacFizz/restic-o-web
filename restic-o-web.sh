@@ -1,155 +1,158 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-###############################################################################
-# CONFIGURATION
-###############################################################################
+### VERSIONS
+RESTIC_VERSION="0.18.1"
+RCLONE_VERSION="1.69.1"
+BACKREST_VERSION="1.8.0"
 
-RESTIC_INSTALL_DIR="/usr/local/bin"
-BACKREST_PORT=9898
-SERVICE="backrest.service"
-SYSTEMD_DIR="/etc/systemd/system"
+INSTALL_BIN="/usr/local/bin"
+BACKREST_DIR="/var/lib/backrest"
+BACKREST_PORT="9898"
 
-###############################################################################
-# ROOT CHECK
-###############################################################################
+### UTILS
+info() { echo "[+] $*"; }
+warn() { echo "[!] $*"; }
+die()  { echo "[X] $*" >&2; exit 1; }
 
-if [[ $EUID -ne 0 ]]; then
-  echo "Ce script doit être exécuté en root (sudo)." >&2
-  exit 1
-fi
+### ROOT CHECK
+[[ $EUID -eq 0 ]] || die "Exécuter ce script en root"
 
-###############################################################################
-# ARCHITECTURE
-###############################################################################
-
-echo "==> Détection de l’architecture"
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64)  RESTIC_ARCH="amd64" ;;
-  aarch64) RESTIC_ARCH="arm64" ;;
-  armv7l)  RESTIC_ARCH="arm" ;;
-  *)
-    echo "Architecture non supportée : $ARCH" >&2
-    exit 1
-    ;;
+### ARCH
+case "$(uname -m)" in
+  aarch64|arm64) ARCH="arm64" ;;
+  x86_64)        ARCH="amd64" ;;
+  *) die "Architecture non supportée" ;;
 esac
 
-###############################################################################
-# CLEAN BACKREST (OLD INSTALL)
-###############################################################################
+### APT DEPS
+info "Installation dépendances système"
+apt update
+apt install -y curl unzip ca-certificates fuse
 
-echo "==> Suppression d’une installation Backrest existante (si présente)"
-
-if systemctl list-unit-files | grep -q "^${SERVICE}"; then
-  systemctl stop "${SERVICE}" || true
-  systemctl disable "${SERVICE}" || true
-fi
-
-rm -f "${SYSTEMD_DIR}/${SERVICE}"
-rm -rf "${SYSTEMD_DIR}/${SERVICE}.d"
-
-if command -v backrest >/dev/null 2>&1; then
-  rm -f "$(command -v backrest)"
-fi
-
-systemctl daemon-reload
-
-###############################################################################
+########################################
 # RESTIC
-###############################################################################
-
-echo "==> Installation de Restic (dernière version GitHub)"
-
-if command -v restic >/dev/null 2>&1; then
-  rm -f "$(command -v restic)"
+########################################
+if ! command -v restic >/dev/null; then
+  info "Installation Restic ${RESTIC_VERSION}"
+  TMP=$(mktemp -d)
+  cd "$TMP"
+  curl -fLO https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${ARCH}.bz2
+  bunzip2 restic_*.bz2
+  install -m755 restic_* "${INSTALL_BIN}/restic"
+  cd /
+  rm -rf "$TMP"
+else
+  info "Restic déjà installé"
 fi
 
-RESTIC_VERSION="$(curl -fsSL https://api.github.com/repos/restic/restic/releases/latest \
-  | grep '"tag_name"' | cut -d '"' -f4)"
+########################################
+# RCLONE
+########################################
+if ! command -v rclone >/dev/null; then
+  info "Installation rclone ${RCLONE_VERSION}"
+  TMP=$(mktemp -d)
+  cd "$TMP"
+  curl -fLO https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${ARCH}.zip
+  unzip rclone-*.zip
+  install -m755 rclone-*/rclone "${INSTALL_BIN}/rclone"
+  cd /
+  rm -rf "$TMP"
+else
+  info "rclone déjà installé"
+fi
 
-RESTIC_VERSION_CLEAN="${RESTIC_VERSION#v}"
-RESTIC_FILE="restic_${RESTIC_VERSION_CLEAN}_linux_${RESTIC_ARCH}.bz2"
-RESTIC_URL="https://github.com/restic/restic/releases/download/${RESTIC_VERSION}/${RESTIC_FILE}"
-
-curl -fsSL "$RESTIC_URL" -o "/tmp/${RESTIC_FILE}"
-bunzip2 -f "/tmp/${RESTIC_FILE}"
-
-install -m 0755 "/tmp/restic_${RESTIC_VERSION_CLEAN}_linux_${RESTIC_ARCH}" \
-  "${RESTIC_INSTALL_DIR}/restic"
-
-rm -f "/tmp/restic_${RESTIC_VERSION_CLEAN}_linux_${RESTIC_ARCH}"
-
-restic version
-
-###############################################################################
+########################################
 # BACKREST
-###############################################################################
+########################################
+if ! command -v backrest >/dev/null; then
+  info "Installation Backrest ${BACKREST_VERSION}"
+  TMP=$(mktemp -d)
+  cd "$TMP"
+  curl -fLO https://github.com/garethgeorge/backrest/releases/download/v${BACKREST_VERSION}/backrest_Linux_${ARCH}.tar.gz
+  tar xzf backrest_*.tar.gz
+  install -m755 backrest "${INSTALL_BIN}/backrest"
+  cd /
+  rm -rf "$TMP"
+else
+  info "Backrest déjà installé"
+fi
 
-echo "==> Installation de Backrest via install.sh"
+########################################
+# RCLONE CONFIG
+########################################
+echo
+read -rp "Configurer un remote rclone maintenant ? (Nextcloud/WebDAV) [y/N] " ans
+if [[ "$ans" =~ ^[yY]$ ]]; then
+  info "Lancement de rclone config"
+  rclone config
+fi
 
-TMP_DIR="$(mktemp -d)"
-cd "$TMP_DIR"
+########################################
+# RESTIC REPO INIT (OPTIONNEL)
+########################################
+echo
+read -rp "Initialiser un dépôt Restic via rclone maintenant ? [y/N] " ans
+if [[ "$ans" =~ ^[yY]$ ]]; then
+  read -rp "Nom du remote rclone (ex: nxt) : " RCLONE_REMOTE
+  read -rp "Chemin du dépôt (ex: Apps/restic) : " RCLONE_PATH
+  export RESTIC_REPOSITORY="rclone:${RCLONE_REMOTE}:${RCLONE_PATH}"
+  read -rsp "Mot de passe Restic : " RESTIC_PASSWORD
+  echo
+  export RESTIC_PASSWORD
+  restic init
+fi
 
-BACKREST_VERSION="$(curl -fsSL https://api.github.com/repos/garethgeorge/backrest/releases/latest \
-  | grep '"tag_name"' | cut -d '"' -f4)"
+########################################
+# BACKREST SYSTEMD
+########################################
+info "Configuration service systemd Backrest"
 
-BACKREST_TARBALL="backrest_Linux_${RESTIC_ARCH}.tar.gz"
-BACKREST_URL="https://github.com/garethgeorge/backrest/releases/download/${BACKREST_VERSION}/${BACKREST_TARBALL}"
+mkdir -p "$BACKREST_DIR"
 
-curl -fsSL "$BACKREST_URL" -o backrest.tar.gz
-tar -xzf backrest.tar.gz
+cat >/etc/systemd/system/backrest.service <<EOF
+[Unit]
+Description=Backrest Backup UI
+After=network.target
 
-chmod +x install.sh
-./install.sh --allow-remote-access
+[Service]
+Type=simple
+ExecStart=${INSTALL_BIN}/backrest
+Environment=BACKREST_DATA_DIR=${BACKREST_DIR}
+Environment=BACKREST_PORT=0.0.0.0:${BACKREST_PORT}
+Restart=on-failure
 
-cd /
-rm -rf "$TMP_DIR"
+[Install]
+WantedBy=multi-user.target
+EOF
 
+systemctl daemon-reexec
 systemctl daemon-reload
-systemctl enable --now backrest.service
+systemctl enable --now backrest
 
-###############################################################################
+########################################
 # FIREWALL
-###############################################################################
-
-echo "==> Configuration du pare-feu (si présent)"
-
-if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-  echo "    UFW actif – ouverture du port ${BACKREST_PORT}/tcp"
-  ufw allow "${BACKREST_PORT}/tcp"
-elif command -v nft >/dev/null 2>&1; then
-  echo "    nftables détecté – ouverture du port ${BACKREST_PORT}/tcp"
-  nft list ruleset | grep -q "backrest" || \
-    nft add rule inet filter input tcp dport ${BACKREST_PORT} ct state new accept comment \"backrest\"
-else
-  echo "    Aucun pare-feu géré détecté"
+########################################
+if command -v ufw >/dev/null; then
+  ufw allow ${BACKREST_PORT}/tcp || true
 fi
 
-###############################################################################
-# TEST CONNECTIVITÉ
-###############################################################################
+########################################
+# FIN
+########################################
+IP=$(hostname -I | awk '{print $1}')
 
-echo "==> Test d’accessibilité Backrest"
-
-HOST_IP="$(ip -4 route get 1.1.1.1 | awk '{print $7; exit}')"
-BACKREST_URL="http://${HOST_IP}:${BACKREST_PORT}"
-
-echo "    URL testée : ${BACKREST_URL}"
-
-sleep 3
-
-if command -v curl >/dev/null 2>&1; then
-  curl -fs "$BACKREST_URL" >/dev/null
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO- "$BACKREST_URL" >/dev/null
-else
-  echo "curl ou wget requis pour le test HTTP" >&2
-  exit 1
-fi
-
-echo "✔ Backrest est accessible depuis le réseau"
-
-###############################################################################
-echo "==> Installation terminée avec succès"
+echo
+echo "--------------------------------------------------"
+echo "INSTALLATION TERMINÉE"
+echo
+echo "Backrest UI : http://${IP}:${BACKREST_PORT}"
+echo
+echo "Exemple dépôt Restic :"
+echo '  rclone:<remote>:<path>'
+echo
+echo "Restic low priority (manuel) :"
+echo '  ionice -c3 nice -n19 restic backup /etc'
+echo
+echo "Les plans, prune et rétention se configurent dans Backrest"
+echo "--------------------------------------------------"
