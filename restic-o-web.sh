@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+### FLAGS
+ALLOW_REMOTE=false
+for arg in "$@"; do
+  case "$arg" in
+    --allow-remote-access)
+      ALLOW_REMOTE=true
+      ;;
+    *)
+      ;;
+  esac
+done
+
 ### VERSIONS
 RESTIC_VERSION="0.18.1"
 RCLONE_VERSION="1.69.1"
@@ -69,14 +81,51 @@ if ! command -v backrest >/dev/null; then
   info "Installation Backrest ${BACKREST_VERSION}"
   TMP=$(mktemp -d)
   cd "$TMP"
-  curl -fLO https://github.com/garethgeorge/backrest/releases/download/v${BACKREST_VERSION}/backrest_Linux_${ARCH}.tar.gz
-  tar xzf backrest_*.tar.gz
-  install -m755 backrest "${INSTALL_BIN}/backrest"
+  ARCH=arm64
+  curl -L -o backrest.tar.gz \
+    "https://github.com/garethgeorge/backrest/releases/latest/download/backrest_linux_${ARCH}.tar.gz"
+
+  tar xzf backrest.tar.gz
+
+  chmod +x install.sh
+  ./install.sh --allow-remote-access
+
   cd /
   rm -rf "$TMP"
 else
   info "Backrest déjà installé"
 fi
+
+########################################
+# BACKREST SYSTEMD OVERRIDE
+########################################
+info "Configuration override systemd Backrest (low priority)"
+
+OVERRIDE_DIR="/etc/systemd/system/backrest.service.d"
+OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
+
+mkdir -p "${OVERRIDE_DIR}"
+
+cat > "${OVERRIDE_FILE}" <<'EOF'
+[Service]
+User=root
+Group=root
+
+Environment=HOME=/root
+Environment=XDG_DATA_HOME=/root/.local/share
+
+Nice=19
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+EOF
+
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable backrest.service
+systemctl restart backrest.service
+
 
 ########################################
 # RCLONE CONFIG
